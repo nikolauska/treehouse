@@ -209,6 +209,18 @@ func TestIsHeadMergedIntoRefFailsClosedWhenTargetCannotBeVerified(t *testing.T) 
 	}
 }
 
+func TestExcludedIncludeSubtreeAllowsNestedDirectoryPattern(t *testing.T) {
+	if excludedIncludeSubtree("foo/bar/file.txt", "!foo/\nbar/\n") {
+		t.Fatal("nested directory pattern should re-include the file")
+	}
+	if !excludedIncludeSubtree("foo/baz/file.txt", "!foo/\nbar/\n") {
+		t.Fatal("unmatched directory should remain excluded")
+	}
+	if !excludedIncludeSubtree("foo/bar", "!foo/\nbar/\n") {
+		t.Fatal("directory pattern should not match a file basename")
+	}
+}
+
 func mustGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

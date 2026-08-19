@@ -281,9 +281,20 @@ func excludedIncludeSubtree(name, manifest string) bool {
 }
 
 func includePatternMatches(name, pattern string) bool {
+	anchored := strings.HasPrefix(pattern, "/")
 	pattern = strings.TrimPrefix(pattern, "/")
 	if strings.HasSuffix(pattern, "/") {
 		dir := strings.TrimSuffix(pattern, "/")
+		if !anchored && !strings.Contains(dir, "/") {
+			parts := strings.Split(name, "/")
+			for _, part := range parts[:len(parts)-1] {
+				matched, _ := path.Match(dir, part)
+				if matched {
+					return true
+				}
+			}
+			return false
+		}
 		return name == dir || strings.HasPrefix(name, dir+"/")
 	}
 	if !strings.Contains(pattern, "/") {
