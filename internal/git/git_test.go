@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -206,6 +207,138 @@ func TestIsHeadMergedIntoRefFailsClosedWhenTargetCannotBeVerified(t *testing.T) 
 
 	if _, err := IsHeadMergedIntoRef(repoDir, "refs/heads/missing"); err == nil {
 		t.Fatal("expected merge verification error for missing target ref")
+	}
+}
+
+func TestRootedSeedWriteRejectsEscapingSymlinkAfterRootOpen(t *testing.T) {
+	worktree := t.TempDir()
+	outside := t.TempDir()
+	root, err := os.OpenRoot(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := os.Symlink(outside, filepath.Join(worktree, "config")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rel := filepath.FromSlash("config/settings.env")
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err == nil {
+		t.Fatal("expected rooted mkdir to reject an escaping symlink")
+	}
+	if err := writeSeedFile(root, rel, []byte("seeded\n"), 0o644); err == nil {
+		t.Fatal("expected rooted write to reject an escaping symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "settings.env")); !os.IsNotExist(err) {
+		t.Fatalf("outside destination was created: %v", err)
+	}
+}
+
+func TestRootedSeedWriteRejectsInRootSymlinkToTrackedFile(t *testing.T) {
+	worktree := t.TempDir()
+	tracked := filepath.Join(worktree, "tracked.env")
+	if err := os.WriteFile(tracked, []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	seeded := filepath.Join(worktree, ".env")
+	if err := os.Symlink("tracked.env", seeded); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := writeSeedFile(root, ".env", []byte("seeded\n"), 0o644); err == nil {
+		t.Fatal("expected rooted write to reject an in-root symlink")
+	}
+	got, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "tracked\n" {
+		t.Fatalf("tracked file was modified: %q", got)
+	}
+}
+
+func TestRootedSeedWriteRejectsInRootParentSymlinkToTrackedFile(t *testing.T) {
+	worktree := t.TempDir()
+	tracked := filepath.Join(worktree, "settings.env")
+	if err := os.WriteFile(tracked, []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := os.Symlink(".", filepath.Join(worktree, "config")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rel := filepath.FromSlash("config/settings.env")
+	if err := writeSeedFile(root, rel, []byte("seeded\n"), 0o644); err == nil {
+		t.Fatal("expected rooted write to reject an in-root parent symlink")
+	}
+	got, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "tracked\n" {
+		t.Fatalf("tracked file was modified: %q", got)
+	}
+}
+
+func TestOpenRootedParentKeepsOriginalDirectoryAfterPathReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit renaming an open directory")
+	}
+	worktree := t.TempDir()
+	original := filepath.Join(worktree, "config")
+	if err := os.Mkdir(original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	parent, name, closeParents, err := openRootedParent(root, filepath.FromSlash("config/settings.env"))
+	if err != nil {
+		t.Fatalf("openRootedParent failed: %v", err)
+	}
+	defer closeParents()
+
+	renamed := filepath.Join(worktree, "config.original")
+	if err := os.Rename(original, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := parent.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.Write([]byte("seeded\n")); err != nil {
+		dst.Close()
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(renamed, "settings.env")); err != nil {
+		t.Fatalf("original directory did not receive the write: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(original, "settings.env")); !os.IsNotExist(err) {
+		t.Fatalf("replacement directory received the write: %v", err)
 	}
 }
 

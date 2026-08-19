@@ -202,6 +202,14 @@ func SeedWorktree(repoRoot, worktreePath string) error {
 		}
 		return err
 	}
+	destinationRoot, err := os.OpenRoot(worktreePath)
+	if err != nil {
+		return err
+	}
+	defer destinationRoot.Close()
+
+	// Keep the root handle for every destination operation; checking path
+	// components separately cannot close the replacement window.
 	trackedOutput, err := gitOutput(worktreePath, nil, "ls-files", "-z")
 	if err != nil {
 		return err
@@ -220,10 +228,6 @@ func SeedWorktree(repoRoot, worktreePath string) error {
 			continue
 		}
 		src := filepath.Join(repoRoot, rel)
-		dst := filepath.Join(worktreePath, rel)
-		if err := rejectSymlinkPath(worktreePath, rel); err != nil {
-			return err
-		}
 		info, err := os.Stat(src)
 		if err != nil {
 			return err
@@ -232,35 +236,121 @@ func SeedWorktree(repoRoot, worktreePath string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
-			return err
-		}
-		if err := os.Chmod(dst, info.Mode().Perm()); err != nil {
+		if err := writeSeedFile(destinationRoot, rel, data, info.Mode().Perm()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func rejectSymlinkPath(root, rel string) error {
-	path := root
-	for _, part := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
-		path = filepath.Join(path, part)
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			return nil
+func writeSeedFile(root *os.Root, rel string, data []byte, mode os.FileMode) error {
+	parent, name, closeParents, err := openRootedParent(root, rel)
+	if err != nil {
+		return err
+	}
+	defer closeParents()
+
+	info, err := parent.Lstat(name)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to seed through symlink %s", filepath.Join(root.Name(), rel))
 		}
-		if err != nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to seed non-regular path %s", filepath.Join(root.Name(), rel))
+		}
+		if err := parent.Remove(name); err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to seed through symlink %s", path)
+	case !os.IsNotExist(err):
+		return err
+	}
+
+	// O_EXCL keeps Root.OpenFile from resolving a symlink that appears after
+	// the final path check; a replacement link makes the create fail instead.
+	dst, err := parent.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := dst.Write(data); err != nil {
+		dst.Close()
+		return err
+	}
+	// Chmod the opened file instead of resolving the destination path again.
+	if err := dst.Chmod(mode); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+func openRootedParent(root *os.Root, rel string) (*os.Root, string, func(), error) {
+	parentPath := filepath.Clean(filepath.Dir(rel))
+	current := root
+	opened := make([]*os.Root, 0)
+	closeOpened := func() {
+		for i := len(opened) - 1; i >= 0; i-- {
+			_ = opened[i].Close()
 		}
 	}
-	return nil
+	fail := func(err error) (*os.Root, string, func(), error) {
+		closeOpened()
+		return nil, "", func() {}, err
+	}
+
+	for _, part := range strings.Split(parentPath, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+
+		var info os.FileInfo
+		var err error
+		for {
+			info, err = current.Lstat(part)
+			if !os.IsNotExist(err) {
+				break
+			}
+			if mkdirErr := current.Mkdir(part, 0o755); mkdirErr != nil && !os.IsExist(mkdirErr) {
+				return fail(mkdirErr)
+			}
+		}
+		if err != nil {
+			return fail(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fail(fmt.Errorf("refusing to seed through symlink %s", filepath.Join(root.Name(), parentPath)))
+		}
+		if !info.IsDir() {
+			return fail(fmt.Errorf("refusing to seed through non-directory path %s", filepath.Join(root.Name(), parentPath)))
+		}
+
+		child, err := current.OpenRoot(part)
+		if err != nil {
+			return fail(err)
+		}
+		childInfo, err := child.Stat(".")
+		if err != nil {
+			_ = child.Close()
+			return fail(err)
+		}
+		if !os.SameFile(info, childInfo) {
+			_ = child.Close()
+			return fail(fmt.Errorf("refusing to seed through changed path %s", filepath.Join(root.Name(), parentPath)))
+		}
+		currentInfo, err := current.Lstat(part)
+		if err != nil {
+			_ = child.Close()
+			return fail(err)
+		}
+		if currentInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, currentInfo) {
+			_ = child.Close()
+			return fail(fmt.Errorf("refusing to seed through changed path %s", filepath.Join(root.Name(), parentPath)))
+		}
+		opened = append(opened, child)
+		current = child
+	}
+
+	return current, filepath.Base(rel), closeOpened, nil
 }
 
 func excludedIncludeSubtree(name, manifest string) bool {
