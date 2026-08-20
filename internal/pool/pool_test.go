@@ -110,7 +110,7 @@ func TestAcquire_SeedsWorktreeIncludeOnCreateAndReuse(t *testing.T) {
 		}
 	}
 	write(".gitignore", ".env*\nlocal/\ntracked.env\n")
-	write(".worktreeinclude", ".env*\n!.env.local\nlocal/\n!local/archive/\nlocal/archive/keep.txt\ntracked.env\n")
+	write(".worktreeinclude", ".env*\n!.env.local\nlocal/\n!local/*/\nlocal/*/keep.txt\ntracked.env\n")
 	write(".env", "first\n")
 	write(".env.local", "local\n")
 	write("local/config.txt", "config\n")

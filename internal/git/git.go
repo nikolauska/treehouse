@@ -385,7 +385,17 @@ func includePatternMatches(name, pattern string) bool {
 			}
 			return false
 		}
-		return name == dir || strings.HasPrefix(name, dir+"/")
+		parts := strings.Split(name, "/")
+		for i := 1; i < len(parts); i++ {
+			parent := strings.Join(parts[:i], "/")
+			matched, _ := path.Match(dir, parent)
+			if matched {
+				// Matching a parent directory excludes its descendants, just as
+				// Git's directory patterns do.
+				return true
+			}
+		}
+		return false
 	}
 	if !strings.Contains(pattern, "/") {
 		name = path.Base(name)
